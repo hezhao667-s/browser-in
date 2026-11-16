@@ -273,10 +273,21 @@ async function handleProxy(req, res, u) {
     return;
   }
 
-  // stream everything else (images, JS, fonts, video) with Range support
-  for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control']) {
+  // stream everything else (images, JS, fonts, video) with Range support.
+  // NOTE: never forward the upstream content-length on a full (200) response:
+  // fetch() transparently gunzips the body, so the upstream length is the
+  // COMPRESSED size while the body we send is the full size. Telling the
+  // browser the smaller size truncates JS/CSS/images mid-file, which shows
+  // up as "Unexpected end of input" and unstyled pages. Without a
+  // content-length Node uses chunked encoding and the whole body arrives.
+  // Range (206) responses are never compressed, so their length is safe.
+  for (const h of ['content-type', 'content-range', 'accept-ranges', 'cache-control']) {
     const v = upstream.headers.get(h);
     if (v) outHeaders[h] = v;
+  }
+  if (upstream.status === 206) {
+    const len = upstream.headers.get('content-length');
+    if (len) outHeaders['content-length'] = len;
   }
   if (!outHeaders['content-type']) outHeaders['content-type'] = 'application/octet-stream';
   res.writeHead(upstream.status, outHeaders);
