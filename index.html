@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser in a Browser</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #1e1e2e; color: #eee; display: flex; flex-direction: column; }
+  /* ---- tab strip ---- */
+  #tabs { display: flex; align-items: flex-end; gap: 4px; padding: 8px 8px 0; background: #181824; overflow-x: auto; scrollbar-width: none; }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab { display: flex; align-items: center; gap: 8px; min-width: 140px; max-width: 220px; padding: 8px 10px; background: #2a2a3d; border-radius: 10px 10px 0 0; cursor: pointer; white-space: nowrap; overflow: hidden; font-size: 13px; flex-shrink: 0; }
+  .tab.active { background: #1e1e2e; color: #fff; }
+  .tab .t { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .tab .x { border: none; background: transparent; color: #aaa; font-size: 14px; cursor: pointer; line-height: 1; padding: 0 2px; }
+  .tab .x:hover { color: #fff; }
+  #newtab { border: none; background: #2a2a3d; color: #ccc; font-size: 18px; width: 32px; height: 32px; border-radius: 8px; cursor: pointer; flex-shrink: 0; margin-bottom: 2px; }
+  #newtab:hover { background: #3a3a52; color: #fff; }
+  /* ---- toolbar ---- */
+  #toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #1e1e2e; }
+  .navbtn { border: none; background: #2a2a3d; color: #ddd; width: 34px; height: 34px; border-radius: 8px; font-size: 16px; cursor: pointer; flex-shrink: 0; }
+  .navbtn:hover:not(:disabled) { background: #3a3a52; color: #fff; }
+  .navbtn:disabled { opacity: 0.35; cursor: default; }
+  #addr { flex: 1; height: 34px; border: none; outline: none; border-radius: 8px; background: #2a2a3d; color: #fff; padding: 0 12px; font-size: 14px; min-width: 0; }
+  #addr:focus { box-shadow: 0 0 0 2px #6c5ce7; }
+  #go { border: none; background: #6c5ce7; color: #fff; height: 34px; padding: 0 16px; border-radius: 8px; font-size: 14px; cursor: pointer; flex-shrink: 0; }
+  #go:hover { background: #7d6ff0; }
+  /* ---- viewer ---- */
+  #viewer { flex: 1; position: relative; background: #fff; }
+  #frame { width: 100%; height: 100%; border: none; background: #fff; display: block; }
+  /* ---- new tab page ---- */
+  #newtab-page { position: absolute; inset: 0; background: #1e1e2e; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 24px; overflow-y: auto; }
+  #newtab-page h1 { font-size: 28px; font-weight: 700; color: #fff; }
+  #newtab-page p { color: #aaa; font-size: 14px; }
+  #search { width: min(560px, 90%); height: 46px; border: none; outline: none; border-radius: 12px; background: #2a2a3d; color: #fff; padding: 0 16px; font-size: 16px; }
+  #search:focus { box-shadow: 0 0 0 2px #6c5ce7; }
+  #quick { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; width: min(640px, 94%); }
+  .card { background: #2a2a3d; border: none; border-radius: 12px; padding: 14px; text-align: left; cursor: pointer; color: #eee; }
+  .card:hover { background: #3a3a52; }
+  .card b { display: block; font-size: 14px; margin-bottom: 4px; }
+  .card span { font-size: 12px; color: #aaa; }
+  /* ---- error bar / status ---- */
+  #status { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; background: #2a2a3d; color: #ddd; font-size: 13px; padding: 8px 14px; border-radius: 8px; display: none; box-shadow: 0 4px 16px rgba(0,0,0,.4); max-width: 90%; }
+  #status.err { background: #5a2b2b; color: #ffd7d7; }
+  #status button { margin-left: 10px; border: none; background: #6c5ce7; color: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  #spinner { display: none; width: 18px; height: 18px; border: 2px solid #555; border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div id="tabs"></div>
+  <div id="toolbar">
+    <button class="navbtn" id="back" title="Back">&#8592;</button>
+    <button class="navbtn" id="fwd" title="Forward">&#8594;</button>
+    <button class="navbtn" id="reload" title="Reload">&#8635;</button>
+    <button class="navbtn" id="home" title="Home">&#8962;</button>
+    <input id="addr" type="text" placeholder="Type an address or search" autocomplete="off" spellcheck="false">
+    <div id="spinner"></div>
+    <button id="go">Go</button>
+  </div>
+  <div id="viewer">
+    <iframe id="frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" allow="autoplay; fullscreen; picture-in-picture; encrypted-media; clipboard-write"></iframe>
+    <div id="newtab-page">
+      <h1>Browser in a Browser</h1>
+      <p>Type an address above — or start with one of these:</p>
+      <input id="search" type="text" placeholder="Search or type a web address" autocomplete="off" spellcheck="false">
+      <div id="quick"></div>
+    </div>
+    <div id="status"></div>
+  </div>
+
+<script>
+(function () {
+  var PROXY = '/proxy?url=';
+  var frame = document.getElementById('frame');
+  var addr = document.getElementById('addr');
+  var search = document.getElementById('search');
+  var newTabPage = document.getElementById('newtab-page');
+  var statusEl = document.getElementById('status');
+  var spinner = document.getElementById('spinner');
+  var tabsEl = document.getElementById('tabs');
+
+  var QUICK = [
+    ['Wikipedia', 'wikipedia.org', 'https://www.wikipedia.org'],
+    ['Example.com', 'example.com', 'https://example.com'],
+    ['OpenStreetMap', 'openstreetmap.org', 'https://www.openstreetmap.org'],
+    ['Project Gutenberg', 'gutenberg.org', 'https://www.gutenberg.org'],
+    ['Internet Archive', 'archive.org', 'https://archive.org'],
+    ['Hacker News', 'news.ycombinator.com', 'https://news.ycombinator.com'],
+    ['MDN Web Docs', 'developer.mozilla.org', 'https://developer.mozilla.org'],
+    ['W3C', 'w3.org', 'https://www.w3.org']
+  ];
+
+  var tabs = [];
+  var activeId = null;
+  var uid = 0;
+
+  function proxyFor(url) { return PROXY + encodeURIComponent(url); }
+
+  function normalize(input) {
+    input = (input || '').trim();
+    if (!input) return null;
+    if (/^https?:\/\//i.test(input)) return input;
+    if (/^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(input)) return 'https://' + input;
+    return 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(input);
+  }
+
+  function showStatus(msg, isErr, withReload) {
+    statusEl.textContent = msg;
+    statusEl.className = isErr ? 'err' : '';
+    statusEl.style.display = 'block';
+    if (withReload) {
+      var b = document.createElement('button');
+      b.textContent = 'Reload';
+      b.onclick = function () { var t = activeTab(); if (t && t.url) load(t, t.url, true); };
+      statusEl.appendChild(b);
+    }
+    clearTimeout(showStatus._t);
+    if (!isErr) showStatus._t = setTimeout(function () { statusEl.style.display = 'none'; }, 4000);
+  }
+
+  function renderTabs() {
+    tabsEl.innerHTML = '';
+    tabs.forEach(function (t) {
+      var d = document.createElement('div');
+      d.className = 'tab' + (t.id === activeId ? ' active' : '');
+      var span = document.createElement('span');
+      span.className = 't';
+      span.textContent = t.title || 'New Tab';
+      var x = document.createElement('button');
+      x.className = 'x';
+      x.textContent = '×';
+      x.title = 'Close tab';
+      x.onclick = function (e) { e.stopPropagation(); closeTab(t.id); };
+      d.appendChild(span);
+      d.appendChild(x);
+      d.onclick = function () { activate(t.id); };
+      tabsEl.appendChild(d);
+    });
+    var plus = document.createElement('button');
+    plus.id = 'newtab';
+    plus.textContent = '+';
+    plus.title = 'New tab';
+    plus.onclick = function () { newTab(); };
+    tabsEl.appendChild(plus);
+  }
+
+  function activeTab() {
+    for (var i = 0; i < tabs.length; i++) if (tabs[i].id === activeId) return tabs[i];
+    return null;
+  }
+
+  function load(tab, url, fresh) {
+    tab.url = url;
+    tab.title = url.replace(/^https?:\/\//, '').split('/')[0];
+    newTabPage.style.display = 'none';
+    addr.value = url;
+    spinner.style.display = 'block';
+    frame.src = proxyFor(url) + (fresh ? '&fresh=1' : '');
+    renderTabs();
+    updateNav();
+  }
+
+  function go(input) {
+    var t = activeTab();
+    if (!t) return;
+    var url = normalize(input);
+    if (!url) return;
+    if (t.url !== url) { t.history = t.history.slice(0, t.hi + 1); t.history.push(url); t.hi = t.history.length - 1; }
+    load(t, url);
+  }
+
+  function newTab() {
+    var t = { id: ++uid, title: 'New Tab', url: null, history: [], hi: -1 };
+    tabs.push(t);
+    activate(t.id);
+  }
+
+  function activate(id) {
+    activeId = id;
+    var t = activeTab();
+    if (t && t.url) {
+      newTabPage.style.display = 'none';
+      addr.value = t.url;
+      frame.src = proxyFor(t.url);
+    } else {
+      newTabPage.style.display = 'flex';
+      addr.value = '';
+      frame.src = 'about:blank';
+    }
+    renderTabs();
+    updateNav();
+    search.focus();
+  }
+
+  function closeTab(id) {
+    var i = tabs.findIndex(function (t) { return t.id === id; });
+    if (i < 0) return;
+    tabs.splice(i, 1);
+    if (!tabs.length) { newTab(); return; }
+    if (activeId === id) activate(tabs[Math.max(0, i - 1)].id);
+    else renderTabs();
+  }
+
+  function updateNav() {
+    var t = activeTab();
+    document.getElementById('back').disabled = !t || t.hi <= 0;
+    document.getElementById('fwd').disabled = !t || t.hi >= t.history.length - 1;
+  }
+
+  document.getElementById('back').onclick = function () {
+    var t = activeTab(); if (!t || t.hi <= 0) return;
+    t.hi--; load(t, t.history[t.hi]);
+  };
+  document.getElementById('fwd').onclick = function () {
+    var t = activeTab(); if (!t || t.hi >= t.history.length - 1) return;
+    t.hi++; load(t, t.history[t.hi]);
+  };
+  document.getElementById('reload').onclick = function () {
+    var t = activeTab(); if (t && t.url) load(t, t.url, true);
+  };
+  document.getElementById('home').onclick = function () {
+    var t = activeTab(); if (!t) return;
+    t.url = null; t.history = []; t.hi = -1;
+    activate(t.id);
+  };
+  document.getElementById('go').onclick = function () { go(addr.value); };
+  addr.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(addr.value); });
+  search.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(search.value); });
+  addr.addEventListener('focus', function () { addr.select(); });
+
+  frame.addEventListener('load', function () {
+    spinner.style.display = 'none';
+    var t = activeTab();
+    if (t && t.url && frame.src !== 'about:blank') {
+      try {
+        var u = new URL(frame.src);
+        var target = u.searchParams.get('url');
+        if (target && target !== t.url) { /* navigated inside the page */ }
+      } catch (e) {}
+    }
+  });
+
+  window.addEventListener('message', function (e) {
+    var d = e.data || {};
+    var t = activeTab();
+    if (!t) return;
+    if (d.type === 'nb-title' && d.title) { t.title = d.title; renderTabs(); }
+    if (d.type === 'nb-error' && d.message) {
+      showStatus('Page error: ' + d.message, true, true);
+    }
+  });
+
+  // quick links
+  var quick = document.getElementById('quick');
+  QUICK.forEach(function (q) {
+    var b = document.createElement('button');
+    b.className = 'card';
+    b.innerHTML = '<b></b><span></span>';
+    b.querySelector('b').textContent = q[0];
+    b.querySelector('span').textContent = q[1];
+    b.onclick = function () { go(q[2]); };
+    quick.appendChild(b);
+  });
+
+  newTab();
+})();
+</script>
+</body>
+</html>
