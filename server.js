@@ -15,7 +15,9 @@ function proxyUrl(u, base) {
   try {
     const abs = new URL(u, base).toString();
     if (!/^https?:/.test(abs)) return u;
-    return PROXY_PATH + '?url=' + encodeURIComponent(abs);
+    // target lives in the PATH, not ?url=: form GET submits append ?q=...
+    // after the path, and the server merges those into the target URL.
+    return PROXY_PATH + '/' + encodeURIComponent(abs);
   } catch (e) {
     return u;
   }
@@ -92,7 +94,7 @@ const BOOTSTRAP = (pageUrl) => `<script>
       var abs = new URL(u, PAGE_URL).href;
       if (abs.indexOf(location.origin + '/proxy') === 0) return abs;
       if (!/^https?:/.test(abs)) return null;
-      return '/proxy?url=' + encodeURIComponent(abs);
+      return '/proxy/' + encodeURIComponent(abs);
     } catch(e){ return null; }
   }
   var _fetch = window.fetch.bind(window);
@@ -145,12 +147,7 @@ const BOOTSTRAP = (pageUrl) => `<script>
 </script>`;
 
 function rewriteHtml(html, base) {
-  const boot =
-    `<base href="${PROXY_PATH}?url=${encodeURIComponent(base.toString())}">` +
-    BOOTSTRAP(base.toString());
-  if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + boot);
-  else html = boot + html;
-
+  // 1. rewrite links/resources FIRST ...
   html = html.replace(/((?:href|src|action|poster)\s*=\s*["'])([^"']+)(["'])/gi, (m, pre, u, post) => {
     if (/^(data:|javascript:|mailto:|tel:|blob:|#)/i.test(u)) return m;
     return pre + proxyUrl(u, base) + post;
@@ -163,19 +160,33 @@ function rewriteHtml(html, base) {
     }).join(', ');
     return 'srcset="' + out + '"';
   });
-  html = html.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (m, q, u) => {
+  // lowercase url( only: case-insensitive matching would mangle JS `new URL(` calls
+  html = html.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (m, q, u) => {
     if (/^(data:|blob:|#)/i.test(u)) return m;
     return 'url(' + q + proxyUrl(u, base) + q + ')';
   });
   html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
+  // 2. ... THEN inject base + bootstrap, so neither gets rewritten itself
+  const boot =
+    `<base href="${PROXY_PATH}/${encodeURIComponent(base.toString())}">` +
+    BOOTSTRAP(base.toString());
+  if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + boot);
+  else html = boot + html;
   return html;
 }
 
 async function handleProxy(req, res, u) {
-  const target = u.searchParams.get('url');
+  // Target lives in the path: /proxy/<encodeURIComponent(target)>.
+  // Legacy /proxy?url=<target> still works.
+  let target = null;
+  const m = u.pathname.match(/^\/proxy\/(.+)$/);
+  if (m) {
+    try { target = decodeURIComponent(m[1]); } catch (e) { target = null; }
+  }
+  if (!target) target = u.searchParams.get('url');
   if (!target) {
     res.writeHead(400, { 'Content-Type': 'text/plain' });
-    res.end('Missing ?url=');
+    res.end('Missing target URL');
     return;
   }
   let url;
@@ -190,6 +201,14 @@ async function handleProxy(req, res, u) {
     res.writeHead(400, { 'Content-Type': 'text/plain' });
     res.end('Only http/https URLs');
     return;
+  }
+  // Merge the request's own query string into the target. A search form
+  // inside a page submits GET to the proxy path and appends ?q=... after
+  // it, so those params belong to the target, not the proxy. `fresh` is
+  // our own reload cache-buster, not part of the target.
+  for (const [k, v] of u.searchParams) {
+    if (k === 'url' || k === 'fresh') continue;
+    url.searchParams.set(k, v);
   }
 
   const method = (req.method || 'GET').toUpperCase();
@@ -243,7 +262,7 @@ async function handleProxy(req, res, u) {
 
   if (type.includes('text/css')) {
     let css = await upstream.text();
-    css = css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (m, q, uu) => {
+    css = css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (m, q, uu) => {
       if (/^(data:|blob:|#)/i.test(uu)) return m;
       return 'url(' + q + proxyUrl(uu, url) + q + ')';
     });
@@ -276,12 +295,26 @@ const server = http.createServer((req, res) => {
       fs.createReadStream(path.join(__dirname, 'index.html')).pipe(res);
       return;
     }
-    if (u.pathname === PROXY_PATH) {
+    if (u.pathname === PROXY_PATH || u.pathname.startsWith(PROXY_PATH + '/')) {
       await handleProxy(req, res, u);
       return;
     }
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not found');
+    // A page inside the frame navigated to a bare absolute path (e.g. its JS
+    // did location.href = '/search?q=x'). Recover it from the Referer, which
+    // carries the frame's current proxied URL, and send it through the proxy.
+    const ref = req.headers.referer || '';
+    const rm = ref.match(/\/proxy\/([^/?#]+)/);
+    if (rm) {
+      try {
+        const cur = new URL(decodeURIComponent(rm[1]));
+        const dest = new URL(u.pathname + u.search, cur.origin);
+        res.writeHead(302, { Location: PROXY_PATH + '/' + encodeURIComponent(dest.toString()) });
+        res.end();
+        return;
+      } catch (e) { /* fall through to 404 */ }
+    }
+    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<body style="font-family:sans-serif;padding:40px"><h2>That link left the proxy</h2><p>Copy the address from the address bar at the top and open it there instead.</p><p><a href="/">Back to the browser</a></p></body>');
   })().catch((e) => {
     if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
     res.end('Server error: ' + (e && e.message ? e.message : e));

@@ -73,7 +73,7 @@
 
 <script>
 (function () {
-  var PROXY = '/proxy?url=';
+  var PROXY = '/proxy/';
   var frame = document.getElementById('frame');
   var addr = document.getElementById('addr');
   var search = document.getElementById('search');
@@ -158,7 +158,7 @@
     newTabPage.style.display = 'none';
     addr.value = url;
     spinner.style.display = 'block';
-    frame.src = proxyFor(url) + (fresh ? '&fresh=1' : '');
+    frame.src = proxyFor(url) + (fresh ? '?fresh=1' : '');
     renderTabs();
     updateNav();
   }
@@ -237,7 +237,12 @@
     if (t && t.url && frame.src !== 'about:blank') {
       try {
         var u = new URL(frame.src);
-        var target = u.searchParams.get('url');
+        var target = null;
+        if (u.pathname.indexOf('/proxy/') === 0) {
+          try { target = decodeURIComponent(u.pathname.slice(7)); } catch (e) {}
+        } else {
+          target = u.searchParams.get('url');
+        }
         if (target && target !== t.url) { /* navigated inside the page */ }
       } catch (e) {}
     }
